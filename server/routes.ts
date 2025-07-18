@@ -5,11 +5,27 @@ import { dashboardDataSchema, type Token, type SolPrice } from "@shared/schema";
 
 function confidenceScore(token: any): number {
   let score = 0;
-  if (token.priceChange24h > 100) score += 40;
-  if (token.volume24h > 1_000_000) score += 30;
-  if (token.liquidity > 5000 && token.liquidity < 50000) score += 20;
-  if (token.ageDays < 7) score += 10;
-  if (token.priceChange24h < 0) score -= 20;
+  
+  // High price change bonus (50% of score)
+  if (token.price_change_percentage_24h > 50) score += 50;
+  else if (token.price_change_percentage_24h > 20) score += 30;
+  else if (token.price_change_percentage_24h > 10) score += 20;
+  else if (token.price_change_percentage_24h > 5) score += 10;
+  
+  // Volume bonus (30% of score)
+  if (token.total_volume > 50_000_000) score += 30;
+  else if (token.total_volume > 10_000_000) score += 20;
+  else if (token.total_volume > 1_000_000) score += 15;
+  else if (token.total_volume > 100_000) score += 10;
+  
+  // Market cap sweet spot (20% of score)
+  if (token.market_cap > 1_000_000 && token.market_cap < 100_000_000) score += 20;
+  else if (token.market_cap > 100_000 && token.market_cap < 1_000_000) score += 15;
+  else if (token.market_cap > 10_000 && token.market_cap < 100_000) score += 10;
+  
+  // Penalty for negative price change
+  if (token.price_change_percentage_24h < 0) score -= 20;
+  
   return Math.min(Math.max(score, 0), 100);
 }
 
@@ -23,8 +39,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Get dashboard data with tokens and SOL price
   app.get("/api/dashboard", async (req, res) => {
     try {
-      // Fetch tokens from DexScreener API
-      const tokensResponse = await fetch("https://api.dexscreener.com/latest/dex/search?q=");
+      // Fetch market data from CoinGecko API - get top coins by 24h volume
+      const tokensResponse = await fetch("https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=volume_desc&per_page=100&page=1&sparkline=false&price_change_percentage=24h");
       const tokensData = await tokensResponse.json();
       
       // Fetch SOL price from CoinGecko API
@@ -36,33 +52,48 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const solPriceUsd = solPriceData.solana?.usd || 0;
       const solPricePkr = solPriceUsd * usdToPkrRate;
 
-      // Filter and process tokens
-      const filteredTokens: Token[] = tokensData.pairs
-        ?.filter((t: any) => 
-          t.priceChange24h > 5 && 
-          t.volume24h > 10000 && 
-          t.liquidity > 5000 && 
-          t.liquidity < 50000
-        )
+      console.log("CoinGecko API Response:", {
+        status: tokensResponse.status,
+        hasData: !!tokensData,
+        dataType: typeof tokensData,
+        tokensCount: Array.isArray(tokensData) ? tokensData.length : 0,
+      });
+
+      // Filter and process tokens - focus on coins with good pump potential
+      const filteredTokens: Token[] = tokensData
+        ?.filter((t: any) => {
+          const hasValidData = t.price_change_percentage_24h != null && t.total_volume != null && t.market_cap != null;
+          // Look for coins with positive price change and reasonable volume
+          const meetsThresholds = t.price_change_percentage_24h > 0 && t.total_volume > 100000 && t.market_cap > 1000000;
+          
+          console.log("Token filter:", {
+            symbol: t.symbol?.toUpperCase(),
+            priceChange24h: t.price_change_percentage_24h,
+            volume24h: t.total_volume,
+            marketCap: t.market_cap,
+            hasValidData,
+            meetsThresholds,
+          });
+          
+          return hasValidData && meetsThresholds;
+        })
         .slice(0, 50) // Limit to 50 tokens for performance
         .map((t: any) => {
           const confidence = confidenceScore(t);
           return {
-            pair: t.baseToken?.symbol && t.quoteToken?.symbol 
-              ? `${t.baseToken.symbol}/${t.quoteToken.symbol}`
-              : t.pairAddress?.substring(0, 8) + "..." || "Unknown",
-            chain: t.chainId === "solana" ? "Solana" : 
-                   t.chainId === "ethereum" ? "Ethereum" : 
-                   t.chainId === "bsc" ? "BSC" : t.chainId || "Unknown",
-            priceChange24h: Number(t.priceChange24h) || 0,
-            volume24h: Number(t.volume24h) || 0,
-            liquidity: Number(t.liquidity) || 0,
-            ageDays: t.pairCreatedAt ? Math.floor((Date.now() - new Date(t.pairCreatedAt).getTime()) / (1000 * 60 * 60 * 24)) : 0,
+            pair: `${t.symbol?.toUpperCase()}/USD`,
+            chain: "Multi-Chain", // CoinGecko doesn't specify chain in this endpoint
+            priceChange24h: Number(t.price_change_percentage_24h) || 0,
+            volume24h: Number(t.total_volume) || 0,
+            liquidity: Number(t.market_cap) || 0, // Using market cap as liquidity proxy
+            ageDays: 0, // CoinGecko doesn't provide creation date in this endpoint
             confidence,
             tradePlan: tradePlan(confidence),
-            url: t.url || `https://dexscreener.com/solana/${t.pairAddress}`,
+            url: `https://coingecko.com/en/coins/${t.id}`,
           };
         }) || [];
+
+      console.log("Filtered tokens count:", filteredTokens.length);
 
       const dashboardData = {
         tokens: filteredTokens,
