@@ -59,9 +59,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
         tokensCount: Array.isArray(tokensData) ? tokensData.length : 0,
       });
 
-      // Filter and process tokens - focus on coins with good pump potential
-      const filteredTokens: Token[] = tokensData
-        ?.filter((t: any) => {
+      // Handle API rate limiting and errors
+      let filteredTokens: Token[] = [];
+      
+      if (tokensResponse.status === 429) {
+        // Rate limited - return empty array with message
+        console.log("CoinGecko API rate limited, returning empty results");
+        filteredTokens = [];
+      } else if (Array.isArray(tokensData)) {
+        // Filter and process tokens - focus on coins with good pump potential
+        filteredTokens = tokensData
+          .filter((t: any) => {
           const hasValidData = t.price_change_percentage_24h != null && t.total_volume != null && t.market_cap != null;
           // Look for coins with positive price change and reasonable volume
           const meetsThresholds = t.price_change_percentage_24h > 0 && t.total_volume > 100000 && t.market_cap > 1000000;
